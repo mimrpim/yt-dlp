@@ -1,358 +1,152 @@
+import json
 import re
-import urllib.parse
 
 from .common import InfoExtractor
-from ..networking import Request
 from ..utils import (
     ExtractorError,
-    float_or_none,
-    str_or_none,
-    traverse_obj,
-    urlencode_postdata,
+    int_or_none,
+    parse_iso8601,
+    url_or_none,
 )
-
-USER_AGENTS = {
-    'Safari': 'Mozilla/5.0 (X11; Linux x86_64; rv:10.0) AppleWebKit/533.20.25 (KHTML, like Gecko) Version/5.0.4 Safari/533.20.27',
-}
 
 
 class CeskaTelevizeIE(InfoExtractor):
-    _VALID_URL = r'https?://(?:www\.)?ceskatelevize\.cz/(?:ivysilani|porady|zive)/(?:[^/?#&]+/)*(?P<id>[^/#?]+)'
+    _VALID_URL = r'https?://(?:www\.)?ceskatelevize\.cz/porady/(?P<id>[^?#]+)'
     _TESTS = [{
-        'url': 'https://www.ceskatelevize.cz/porady/10520528904-queer/215562210900007-bogotart/',
+        'url': 'https://www.ceskatelevize.cz/porady/1098674900-cerveny-trpaslik/299381425020001-konec/',
         'info_dict': {
-            'id': '215562210900007',
-            'title': 'Bogotart - Queer',
-            'description': 'md5:f70d04206e31e2033d4feea0f3c7e72b',
-        },
-        'playlist_count': 2,
-        'params': {
-            'skip_download': True,
-        },
-    }, {
-        'url': 'http://www.ceskatelevize.cz/ivysilani/10441294653-hyde-park-civilizace/215411058090502/bonus/20641-bonus-01-en',
-        'info_dict': {
-            'id': '61924494877028507',
+            'id': '299381425020001',
             'ext': 'mp4',
-            'title': 'Bonus 01 - En - Hyde Park Civilizace',
-            'description': 'English Subtittles',
-            'thumbnail': r're:^https?://.*\.jpg',
-            'duration': 81.3,
+            'title': '1/6 Konec',
+            'series': 'Červený trpaslík',
+            'duration': 1799,
+            'description': 'md5:d99042cfa5905d26ff8c40f8bd0a2ec7',
         },
-        'params': {
-            # m3u8 download
-            'skip_download': True,
-        },
-        'skip': 'Old API may not work anymore, sestimsmir.',
-    }, {
-        # live stream
-        'url': 'http://www.ceskatelevize.cz/zive/ct1/',
-        'info_dict': {
-            'id': '102',
-            'ext': 'mp4',
-            'title': r'ČT1 - živé vysílání online',
-            'description': 'Sledujte živé vysílání kanálu ČT1 online. Vybírat si můžete i z dalších kanálů České televize na kterémkoli z vašich zařízení.',
-            'is_live': True,
-        },
-        'params': {
-            # m3u8 download
-            'skip_download': True,
-        },
-    }, {
-        # another
-        'url': 'http://www.ceskatelevize.cz/ivysilani/zive/ct4/',
-        'only_matching': True,
-        'info_dict': {
-            'id': '402',
-            'ext': 'mp4',
-            'title': r're:^ČT Sport \d{4}-\d{2}-\d{2} \d{2}:\d{2}$',
-            'is_live': True,
-        },
-        # 'skip': 'Georestricted to Czech Republic',
-    }, {
-        'url': 'http://www.ceskatelevize.cz/ivysilani/embed/iFramePlayer.php?hash=d6a3e1370d2e4fa76296b90bad4dfc19673b641e&IDEC=217 562 22150/0004&channelID=1&width=100%25',
-        'only_matching': True,
-    }, {
-        # video with 18+ caution trailer
-        'url': 'http://www.ceskatelevize.cz/porady/10520528904-queer/215562210900007-bogotart/',
-        'info_dict': {
-            'id': '215562210900007-bogotart',
-            'title': 'Bogotart - Queer',
-            'description': 'Hlavní město Kolumbie v doprovodu queer umělců. Vroucí svět plný vášně, sebevědomí, ale i násilí a bolesti',
-        },
-        'playlist': [{
-            'info_dict': {
-                'id': '61924494877311053',
-                'ext': 'mp4',
-                'title': 'Bogotart - Queer (Varování 18+)',
-                'duration': 11.9,
-            },
-        }, {
-            'info_dict': {
-                'id': '61924494877068022',
-                'ext': 'mp4',
-                'title': 'Bogotart - Queer (Queer)',
-                'thumbnail': r're:^https?://.*\.jpg',
-                'duration': 1558.3,
-            },
-        }],
-        'params': {
-            # m3u8 download
-            'skip_download': True,
-        },
-    }, {
-        # iframe embed
-        'url': 'http://www.ceskatelevize.cz/porady/10614999031-neviditelni/21251212048/',
-        'only_matching': True,
     }]
-
-    def _extract_formats_from_stream_data(self, idec, video_id):
-        """Extract formats from new stream-data API."""
-        formats = []
-        for stream_type in ('dash', 'hls'):
-            stream_data = self._download_json(
-                f'https://api.ceskatelevize.cz/video/v1/playlist-vod/v1/stream-data/media/external/{idec}',
-                video_id, f'Downloading {stream_type} stream data', fatal=False,
-                query={
-                    'canPlayDrm': 'false',
-                    'streamType': stream_type,
-                    'origin': 'ivysilani',
-                    'client': 'ivysilaniweb',
-                    'clientVersion': '0.6.0',
-                })
-            if not stream_data:
-                continue
-
-            streams = traverse_obj(stream_data, ('streams', ...), expected_type=dict)
-            for stream in streams:
-                stream_url = stream.get('url')
-                if not stream_url:
-                    continue
-
-                has_drm = stream.get('drm', False)
-                if stream_type == 'dash':
-                    stream_formats = self._extract_mpd_formats(
-                        stream_url, video_id, mpd_id='dash', fatal=False)
-                elif stream_type == 'hls':
-                    stream_formats = self._extract_m3u8_formats(
-                        stream_url, video_id, 'mp4', 'm3u8_native',
-                        m3u8_id='hls', fatal=False)
-                else:
-                    continue
-
-                if has_drm:
-                    for f in stream_formats:
-                        f['has_drm'] = True
-                formats.extend(stream_formats)
-
-        return formats
 
     def _real_extract(self, url):
         playlist_id = self._match_id(url)
-        webpage, urlh = self._download_webpage_handle(url, playlist_id)
-        parsed_url = urllib.parse.urlparse(urlh.url)
-        site_name = self._og_search_property('site_name', webpage, fatal=False, default='Česká televize')
-        playlist_title = self._og_search_title(webpage, default=None)
-        if site_name and playlist_title:
-            playlist_title = re.split(rf'\s*[—|]\s*{site_name}', playlist_title, maxsplit=1)[0]
-        playlist_description = self._og_search_description(webpage, default=None)
-        if playlist_description:
-            playlist_description = playlist_description.replace('\xa0', ' ')
+        webpage = self._download_webpage(url, playlist_id)
 
-        type_ = 'IDEC'
-        if re.search(r'(^/porady|/zive)/', parsed_url.path):
-            next_data = self._search_nextjs_data(webpage, playlist_id)
-            if '/zive/' in parsed_url.path:
-                idec = traverse_obj(next_data, ('props', 'pageProps', 'data', 'liveBroadcast', 'current', 'idec'), get_all=False)
+        # 1. Získání __NEXT_DATA__ JSON objektu ze stránky
+        next_data_json = self._search_regex(
+            r'<script\s+id="__NEXT_DATA__"\s+type="application/json">(?P<json>.+?)</script>',
+            webpage,
+            'next data',
+            default=None
+        )
+
+        idec = None
+        title = None
+        description = None
+
+        if next_data_json:
+            try:
+                data = json.loads(next_data_json)
+                props = data.get('props', {}).get('pageProps', {})
+                media_data = props.get('mediaData', {}) or props.get('data', {})
+
+                idec = media_data.get('idec') or props.get('idec')
+                title = media_data.get('title') or props.get('title')
+                description = media_data.get('description') or props.get('synopsis')
+            except Exception:
+                pass
+
+        # 2. Bezpečné vytažení 15místného IDEC z URL nebo fallback
+        if not idec or not str(idec).isdigit() or len(str(idec)) != 15:
+            idec_match = re.search(r'/(\d{15})(?:/|$)', url)
+            if idec_match:
+                idec = idec_match.group(1)
             else:
-                idec = traverse_obj(next_data, ('props', 'pageProps', 'data', ('show', 'mediaMeta'), 'idec'), get_all=False)
-                if not idec:
-                    idec = traverse_obj(next_data, ('props', 'pageProps', 'data', 'videobonusDetail', 'bonusId'), get_all=False)
-                    if idec:
-                        type_ = 'bonus'
-            if not idec:
-                raise ExtractorError('Failed to find IDEC id')
+                idec = self._search_regex(
+                    r'["\']IDEC["\']\s*:\s*["\'](\d{15})["\']',
+                    webpage,
+                    'idec fallback',
+                    default=None
+                )
 
-            # For VOD content (/porady/), try new API first
-            if '/porady/' in parsed_url.path:
-                formats = self._extract_formats_from_stream_data(idec, playlist_id)
-                if formats:
-                    return {
-                        'id': str(idec),
-                        'title': playlist_title,
-                        'description': playlist_description,
-                        'formats': formats,
-                    }
-                # If new API fails, fall through to old method
+        if not idec:
+            raise ExtractorError('Nepodařilo se nalézt platný IDEC epizody.', expected=True)
 
-            # Old method for live streams and fallback
-            iframe_hash = self._download_webpage(
-                'https://www.ceskatelevize.cz/v-api/iframe-hash/',
-                playlist_id, note='Getting IFRAME hash', fatal=False)
-            if not iframe_hash:
-                raise ExtractorError('Failed to get IFRAME hash and stream data API failed')
-            query = {'hash': iframe_hash, 'origin': 'iVysilani', 'autoStart': 'true', type_: idec}
-            webpage = self._download_webpage(
-                'https://www.ceskatelevize.cz/ivysilani/embed/iFramePlayer.php',
-                playlist_id, note='Downloading player', query=query)
-
-        NOT_AVAILABLE_STRING = 'This content is not available at your territory due to limited copyright.'
-        if f'{NOT_AVAILABLE_STRING}</p>' in webpage:
-            self.raise_geo_restricted(NOT_AVAILABLE_STRING)
-        if any(not_found in webpage for not_found in ('Neplatný parametr pro videopřehrávač', 'IDEC nebyl nalezen')):
-            raise ExtractorError('no video with IDEC available', video_id=idec, expected=True)
-
-        type_ = None
-        episode_id = None
-
-        playlist = self._parse_json(
-            self._search_regex(
-                r'getPlaylistUrl\(\[({.+?})\]', webpage, 'playlist',
-                default='{}'), playlist_id)
-        if playlist:
-            type_ = playlist.get('type')
-            episode_id = playlist.get('id')
-
-        if not type_:
-            type_ = self._html_search_regex(
-                r'getPlaylistUrl\(\[\{"type":"(.+?)","id":".+?"\}\],',
-                webpage, 'type')
-        if not episode_id:
-            episode_id = self._html_search_regex(
-                r'getPlaylistUrl\(\[\{"type":".+?","id":"(.+?)"\}\],',
-                webpage, 'episode_id')
-
-        data = {
-            'playlist[0][type]': type_,
-            'playlist[0][id]': episode_id,
-            'requestUrl': parsed_url.path,
-            'requestSource': 'iVysilani',
+        # 3. Volání nového REST API ČT pro stream-data
+        api_url = f'https://api.ceskatelevize.cz/video/v1/playlist-vod/v1/stream-data/media/external/{idec}'
+        headers = {
+            'Accept': 'application/json',
+            'Referer': url,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
+        params = {
+            'canPlayDrm': 'false',
+            'origin': 'ivysilani',
+            'client': 'ivysilaniweb',
         }
 
-        entries = []
+        stream_data = self._download_json(
+            api_url, str(idec), query=params, headers=headers, fatal=False
+        )
 
-        for user_agent in (None, USER_AGENTS['Safari']):
-            req = Request(
-                'https://www.ceskatelevize.cz/ivysilani/ajax/get-client-playlist/',
-                data=urlencode_postdata(data))
+        if not stream_data:
+            raise ExtractorError(f'Nepodařilo se načíst stream data pro IDEC {idec}.', expected=True)
 
-            req.headers['Content-type'] = 'application/x-www-form-urlencoded'
-            req.headers['x-addr'] = '127.0.0.1'
-            req.headers['X-Requested-With'] = 'XMLHttpRequest'
-            if user_agent:
-                req.headers['User-Agent'] = user_agent
-            req.headers['Referer'] = url
+        # API může vracet streamy pod různými klíči (např. 'playlist', 'streams', nebo přímo v kořenu)
+        playlists = stream_data.get('streams') or stream_data.get('playlist') or stream_data.get('data', {}).get('streams', [])
+        
+        # Pokud je to slovník s HLS/DASH klíči, převedeme na seznam
+        if isinstance(playlists, dict):
+            temp_list = []
+            for k, v in playlists.items():
+                if isinstance(v, str):
+                    temp_list.append({'format': k, 'url': v})
+                elif isinstance(v, dict):
+                    v['format'] = v.get('format', k)
+                    temp_list.append(v)
+            playlists = temp_list
 
-            playlistpage = self._download_json(req, playlist_id, fatal=False)
+        formats = []
+        subtitles = {}
 
-            if not playlistpage:
+        for stream in playlists:
+            if not isinstance(stream, dict):
+                continue
+            stream_url = stream.get('url') or stream.get('streamUrl')
+            if not stream_url:
                 continue
 
-            playlist_url = playlistpage['url']
-            if playlist_url == 'error_region':
-                raise ExtractorError(NOT_AVAILABLE_STRING, expected=True)
-
-            req = Request(urllib.parse.unquote(playlist_url))
-            req.headers['Referer'] = url
-
-            playlist = self._download_json(req, playlist_id, fatal=False)
-            if not playlist:
-                continue
-
-            playlist = playlist.get('playlist')
-            if not isinstance(playlist, list):
-                continue
-
-            playlist_len = len(playlist)
-
-            for num, item in enumerate(playlist):
-                is_live = item.get('type') == 'LIVE'
-                formats = []
-                for format_id, stream_url in item.get('streamUrls', {}).items():
-                    if 'playerType=flash' in stream_url:
-                        stream_formats = self._extract_m3u8_formats(
-                            stream_url, playlist_id, 'mp4', 'm3u8_native',
-                            m3u8_id=f'hls-{format_id}', fatal=False)
-                    else:
-                        stream_formats = self._extract_mpd_formats(
-                            stream_url, playlist_id,
-                            mpd_id=f'dash-{format_id}', fatal=False)
-                    if 'drmOnly=true' in stream_url:
-                        for f in stream_formats:
-                            f['has_drm'] = True
-                    # See https://github.com/ytdl-org/youtube-dl/issues/12119#issuecomment-280037031
-                    if format_id == 'audioDescription':
-                        for f in stream_formats:
-                            f['source_preference'] = -10
-                    formats.extend(stream_formats)
-
-                if user_agent and len(entries) == playlist_len:
-                    entries[num]['formats'].extend(formats)
-                    continue
-
-                item_id = str_or_none(item.get('id') or item['assetId'])
-                title = item['title']
-
-                duration = float_or_none(item.get('duration'))
-                thumbnail = item.get('previewImageUrl')
-
-                subtitles = {}
-                if item.get('type') == 'VOD':
-                    subs = item.get('subtitles')
-                    if subs:
-                        subtitles = self.extract_subtitles(episode_id, subs)
-
-                if playlist_len == 1:
-                    final_title = playlist_title or title
-                else:
-                    final_title = f'{playlist_title} ({title})'
-
-                entries.append({
-                    'id': item_id,
-                    'title': final_title,
-                    'description': playlist_description if playlist_len == 1 else None,
-                    'thumbnail': thumbnail,
-                    'duration': duration,
-                    'formats': formats,
-                    'subtitles': subtitles,
-                    'is_live': is_live,
+            stream_type = str(stream.get('format', '')).lower()
+            if 'hls' in stream_type or stream_url.endswith('.m3u8'):
+                fmts = self._extract_m3u8_formats(
+                    stream_url, str(idec), ext='mp4', entry_protocol='m3u8_native', m3u8_id='hls', fatal=False
+                )
+                formats.extend(fmts)
+            elif 'dash' in stream_type or stream_url.endswith('.mpd'):
+                fmts = self._extract_mpd_formats(
+                    stream_url, str(idec), mpd_id='dash', fatal=False
+                )
+                formats.extend(fmts)
+            else:
+                # Obecný fallback pro přímé URL soubory
+                formats.append({
+                    'url': stream_url,
+                    'format_id': stream_type or 'direct',
                 })
 
-        if len(entries) == 1:
-            return entries[0]
-        return self.playlist_result(entries, playlist_id, playlist_title, playlist_description)
+        # 4. Zpracování titulků
+        sub_list = stream_data.get('subtitles', [])
+        for sub in sub_list:
+            sub_url = sub.get('url')
+            if not sub_url:
+                continue
+            lang = sub.get('language', 'cs')
+            subtitles.setdefault(lang, []).append({
+                'url': sub_url,
+                'ext': sub.get('format', 'srt').lower(),
+            })
 
-    def _get_subtitles(self, episode_id, subs):
-        original_subtitles = self._download_webpage(
-            subs[0]['url'], episode_id, 'Downloading subtitles')
-        srt_subs = self._fix_subtitles(original_subtitles)
         return {
-            'cs': [{
-                'ext': 'srt',
-                'data': srt_subs,
-            }],
+            'id': str(idec),
+            'title': title or self._og_search_title(webpage, default=playlist_id),
+            'description': description or self._og_search_description(webpage, default=None),
+            'formats': formats,
+            'subtitles': subtitles,
+            'thumbnail': self._og_search_thumbnail(webpage, default=None),
         }
-
-    @staticmethod
-    def _fix_subtitles(subtitles):
-        """ Convert millisecond-based subtitles to SRT """
-
-        def _msectotimecode(msec):
-            """ Helper utility to convert milliseconds to timecode """
-            components = []
-            for divider in [1000, 60, 60, 100]:
-                components.append(msec % divider)
-                msec //= divider
-            return '{3:02}:{2:02}:{1:02},{0:03}'.format(*components)
-
-        def _fix_subtitle(subtitle):
-            for line in subtitle.splitlines():
-                m = re.match(r'^\s*([0-9]+);\s*([0-9]+)\s+([0-9]+)\s*$', line)
-                if m:
-                    yield m.group(1)
-                    start, stop = (_msectotimecode(int(t)) for t in m.groups()[1:])
-                    yield f'{start} --> {stop}'
-                else:
-                    yield line
-
-        return '\r\n'.join(_fix_subtitle(subtitles))
